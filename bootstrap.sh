@@ -85,7 +85,7 @@ preflight_resources() {
 
 wait_for_cloud_init() {
   CURRENT_STEP="waiting for cloud-init"
-  if command -v cloud-init >/dev/null 2>&1 && cloud-init status 2>/dev/null | grep -qE 'status: (running|not run)'; then
+  if command -v cloud-init >/dev/null 2>&1 && cloud-init status 2>/dev/null | grep -E 'status: (running|not run)' >/dev/null; then
     info "The hosting provider is still initializing Ubuntu. Waiting up to 5 minutes..."
     timeout 300 cloud-init status --wait >/dev/null || die "cloud-init did not finish within 5 minutes. Wait a little and run the installer again."
   fi
@@ -98,7 +98,7 @@ wait_for_apt() {
     if command -v fuser >/dev/null 2>&1; then
       fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1
     else
-      lslocks -n -o PATH 2>/dev/null | grep -qE '^(/var/lib/dpkg/lock-frontend|/var/lib/dpkg/lock|/var/cache/apt/archives/lock)$'
+      lslocks -n -o PATH 2>/dev/null | grep -E '^(/var/lib/dpkg/lock-frontend|/var/lib/dpkg/lock|/var/cache/apt/archives/lock)$' >/dev/null
     fi
   }
   while apt_is_locked; do
@@ -171,7 +171,7 @@ EOF
 
 verify_gpg_fingerprint() {
   local key_file=$1 expected=$2 actual
-  actual=$(gpg --batch --show-keys --with-colons "$key_file" 2>/dev/null | awk -F: '$1 == "fpr" {print $10; exit}')
+  actual=$(gpg --batch --show-keys --with-colons "$key_file" 2>/dev/null | awk -F: '$1 == "fpr" && !found {print $10; found=1}')
   [[ "$actual" == "$expected" ]] || die "Signing-key fingerprint mismatch for $key_file. Expected $expected, got ${actual:-nothing}."
 }
 
@@ -205,10 +205,10 @@ EOF
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
   command -v firefox >/dev/null 2>&1 || die "Firefox installation completed, but the firefox command is missing."
-  if readlink -f "$(command -v firefox)" | grep -q '/snap/'; then
+  if readlink -f "$(command -v firefox)" | grep '/snap/' >/dev/null; then
     die "Firefox resolved to a Snap package. The installer requires Mozilla's DEB build for reliable use inside VNC."
   fi
-  ok "Firefox DEB installed: $(firefox --version 2>/dev/null | head -n1)"
+  ok "Firefox DEB installed: $(firefox --version 2>/dev/null | sed -n '1p')"
 }
 
 install_claude_code() {
@@ -227,7 +227,7 @@ EOF
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y claude-code
   sudo -u "$VIBE_USER" -H claude --version >/dev/null
-  ok "Claude Code installed on the stable channel: $(sudo -u "$VIBE_USER" -H claude --version | head -n1)"
+  ok "Claude Code installed on the stable channel: $(sudo -u "$VIBE_USER" -H claude --version | sed -n '1p')"
 }
 
 port_is_listening() {
@@ -427,16 +427,19 @@ port = ${ssh_port}
 backend = systemd
 EOF
   systemctl enable --now fail2ban.service
-  ufw status | grep -q "${ssh_port}/tcp" || die "UFW does not show an allow rule for SSH port ${ssh_port}."
+  ufw status | grep "${ssh_port}/tcp" >/dev/null || die "UFW does not show an allow rule for SSH port ${ssh_port}."
   ok "UFW and fail2ban configured for SSH port ${ssh_port}"
 }
 
 harden_ssh() {
+  CURRENT_STEP="detecting server-side SSH port"
   local ssh_port="" effective configured_port
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
     ssh_port=$(awk '{print $4}' <<<"$SSH_CONNECTION")
   fi
-  configured_port=$(sshd -T | awk '$1 == "port" {print $2; exit}')
+  # Consume all output: an early awk exit can give sshd SIGPIPE (141)
+  # under pipefail, even when a valid port was already found.
+  configured_port=$(sshd -T | awk '$1 == "port" && !found {print $2; found=1}')
   if ! validate_number "${ssh_port:-}" 1 65535; then
     ssh_port="$configured_port"
   fi
@@ -486,8 +489,8 @@ verify_installation() {
   systemctl is-active --quiet vibecoder-vnc.service
   systemctl is-active --quiet vibecoder-novnc.service
   curl --fail --silent http://127.0.0.1:6080/vnc.html >/dev/null
-  ss -H -ltn | grep -qE '127\.0\.0\.1:5901|\[::1\]:5901'
-  ss -H -ltn | grep -qE '127\.0\.0\.1:6080|\[::1\]:6080'
+  ss -H -ltn | grep -E '127\.0\.0\.1:5901|\[::1\]:5901' >/dev/null
+  ss -H -ltn | grep -E '127\.0\.0\.1:6080|\[::1\]:6080' >/dev/null
   [[ -s "$VIBE_HOME/.ssh/authorized_keys" ]]
   ok "All server-side checks passed"
 }

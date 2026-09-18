@@ -324,15 +324,16 @@ Description=Vibecoder School private TigerVNC desktop
 After=network.target
 
 [Service]
-Type=forking
+# Track the foreground wrapper directly: TigerVNC PID paths differ by version
+# and may contain the FQDN rather than systemd's short hostname.
+Type=simple
 User=${VIBE_USER}
 Group=${VIBE_USER}
 WorkingDirectory=${VIBE_HOME}
 Environment=HOME=${VIBE_HOME}
 Environment=USER=${VIBE_USER}
-PIDFile=${VIBE_HOME}/.vnc/%H:1.pid
 ExecStartPre=-${vnc_server} -kill :1
-ExecStart=${vnc_server} :1 -localhost yes -SecurityTypes None -geometry 1440x900 -depth 24
+ExecStart=${vnc_server} :1 -fg -xstartup ${VIBE_HOME}/.vnc/xstartup -localhost yes -SecurityTypes None -geometry 1440x900 -depth 24
 ExecStop=-${vnc_server} -kill :1
 Restart=on-failure
 RestartSec=5

@@ -91,14 +91,47 @@ wait_for_cloud_init() {
   fi
 }
 
+# A background updater can take a lock after our preflight check. Retry only
+# actual lock contention, including apt-get update's separate lists lock.
+run_package_command() {
+  local waited=0 exit_code error_log
+  error_log=$(mktemp /tmp/vibecoder-apt-errors.XXXXXX)
+  while :; do
+    if LC_ALL=C DEBIAN_FRONTEND=noninteractive "$@" 2>"$error_log"; then
+      cat "$error_log" >&2
+      rm -f -- "$error_log"
+      return 0
+    else
+      exit_code=$?
+    fi
+
+    if ! grep -Eq '^(E:|Error:) Could not get lock .*(held by process|Resource temporarily unavailable)|^dpkg: error: .*lock.*(locked by|held by|Resource temporarily unavailable)' "$error_log"; then
+      cat "$error_log" >&2
+      rm -f -- "$error_log"
+      return "$exit_code"
+    fi
+    if (( waited >= 300 )); then
+      cat "$error_log" >&2
+      rm -f -- "$error_log"
+      warn "Package operation is still locked after 5 minutes of waiting. Let the other updater finish, then run the installer again."
+      return "$exit_code"
+    fi
+    if (( waited % 30 == 0 )); then
+      info "Another package operation acquired a lock; waiting and retrying..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
 wait_for_apt() {
-  CURRENT_STEP="waiting for apt locks"
+  local CURRENT_STEP="waiting for apt locks"
   local waited=0
   apt_is_locked() {
     if command -v fuser >/dev/null 2>&1; then
-      fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1
+      fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1
     else
-      lslocks -n -o PATH 2>/dev/null | grep -E '^(/var/lib/dpkg/lock-frontend|/var/lib/dpkg/lock|/var/cache/apt/archives/lock)$' >/dev/null
+      lslocks -n -o PATH 2>/dev/null | grep -E '^(/var/lib/dpkg/lock-frontend|/var/lib/dpkg/lock|/var/cache/apt/archives/lock|/var/lib/apt/lists/lock)$' >/dev/null
     fi
   }
   while apt_is_locked; do
@@ -109,7 +142,7 @@ wait_for_apt() {
     sleep 5
     waited=$((waited + 5))
   done
-  DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+  run_package_command dpkg --configure -a
 }
 
 decode_public_key() {
@@ -124,7 +157,7 @@ decode_public_key() {
 install_base_packages() {
   CURRENT_STEP="installing Ubuntu packages"
   wait_for_apt
-  apt-get update
+  run_package_command apt-get update
 
   local packages=(
     ca-certificates curl wget gnupg git tmux openssh-server sudo
@@ -139,7 +172,7 @@ install_base_packages() {
   done
   ((${#missing[@]} == 0)) || die "Required Ubuntu packages are unavailable: ${missing[*]}. Check the Ubuntu image and apt sources."
 
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+  run_package_command apt-get install -y --no-install-recommends "${packages[@]}"
   ok "Base packages installed"
 }
 
@@ -202,8 +235,8 @@ Pin-Priority: -1
 EOF
 
   wait_for_apt
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
+  run_package_command apt-get update
+  run_package_command apt-get install -y firefox
   command -v firefox >/dev/null 2>&1 || die "Firefox installation completed, but the firefox command is missing."
   if readlink -f "$(command -v firefox)" | grep '/snap/' >/dev/null; then
     die "Firefox resolved to a Snap package. The installer requires Mozilla's DEB build for reliable use inside VNC."
@@ -224,8 +257,8 @@ deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/cl
 EOF
 
   wait_for_apt
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y claude-code
+  run_package_command apt-get update
+  run_package_command apt-get install -y claude-code
   sudo -u "$VIBE_USER" -H claude --version >/dev/null
   ok "Claude Code installed on the stable channel: $(sudo -u "$VIBE_USER" -H claude --version | sed -n '1p')"
 }

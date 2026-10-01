@@ -7,8 +7,14 @@ param(
 )
 
 $SshPortWasBound = $PSBoundParameters.ContainsKey('SshPort')
+# "irm | iex" runs this code inside the user's PowerShell session, not as a script file:
+# there `exit` would close the whole window together with the error message.
+$RunFromFile = $MyInvocation.MyCommand.CommandType -eq 'ExternalScript'
+$CallerErrorActionPreference = $ErrorActionPreference
 
 Set-StrictMode -Version Latest
+# Windows PowerShell 5.1 applies 'Stop' to stderr of native commands whose output is
+# redirected (2>, *>): any line ssh prints there becomes a terminating error.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -92,8 +98,12 @@ function New-VibecoderKey {
     }
     if (-not (Test-Path $KeyPath)) {
         Write-Info 'Создаю отдельный SSH-ключ для Vibecoder School...'
-        & ssh-keygen.exe -q -t ed25519 -a 64 -N '""' -C 'vibecoder-school' -f $KeyPath
-        Assert-LastExitCode 'Создание SSH-ключа'
+        # Start-Process passes the command line verbatim, so -N "" is an empty passphrase
+        # everywhere: with & PowerShell 5.1 drops '' and 7.3+ passes '""' as two quote chars.
+        $keygen = Start-Process -FilePath 'ssh-keygen.exe' -ArgumentList "-q -t ed25519 -a 64 -N `"`" -C vibecoder-school -f `"$KeyPath`"" -NoNewWindow -Wait -PassThru
+        if ($keygen.ExitCode -ne 0) {
+            Stop-Install "Создание SSH-ключа завершилось с кодом $($keygen.ExitCode)."
+        }
         Write-Ok "SSH-ключ создан: $KeyPath"
     }
     else {
@@ -112,7 +122,11 @@ function Add-RootKey([string]$PublicKeyBase64) {
     Write-Host 'Во время ввода пароля символы и звёздочки не отображаются — это нормально.'
     Write-Host ''
 
-    $remoteCommand = "umask 077; mkdir -p /root/.ssh; touch /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; KEY=`$(printf '%s' '$PublicKeyBase64' | base64 -d); grep -qxF -- `"`$KEY`" /root/.ssh/authorized_keys || printf '%s\n' `"`$KEY`" >> /root/.ssh/authorized_keys"
+    $remoteScript = "umask 077; mkdir -p /root/.ssh; touch /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; KEY=`$(printf '%s' '$PublicKeyBase64' | base64 -d); grep -qxF -- `"`$KEY`" /root/.ssh/authorized_keys || printf '%s\n' `"`$KEY`" >> /root/.ssh/authorized_keys"
+    # Sent base64-encoded: Windows PowerShell 5.1 strips the double quotes inside native
+    # arguments, and the unquoted $KEY was written as three broken lines.
+    $remoteScriptBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScript))
+    $remoteCommand = "printf '%s' '$remoteScriptBase64' | base64 -d | sh"
     & ssh.exe `
         -p $SshPort `
         -i $KeyPath `
@@ -126,6 +140,8 @@ function Add-RootKey([string]$PublicKeyBase64) {
 }
 
 function Test-ExistingVibeLogin {
+    # A failed login is the expected answer here; its stderr must not abort the installer.
+    $ErrorActionPreference = 'Continue'
     & ssh.exe `
         -p $SshPort `
         -i $KeyPath `
@@ -228,7 +244,7 @@ $endMarker
     $utf8NoBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($SshConfigPath, $newContent, $utf8NoBom)
 
-    & ssh.exe -G $SshAlias *> $null
+    & { $ErrorActionPreference = 'Continue'; & ssh.exe -G $SshAlias *> $null }
     Assert-LastExitCode 'Проверка SSH config'
     Write-Ok "В SSH добавлено подключение '$SshAlias'"
 }
@@ -342,10 +358,15 @@ try {
 catch {
     Write-Host "`nОшибка: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host 'Исправьте указанную причину и запустите установщик ещё раз. Уже выполненные безопасные шаги повторно не сломаются.' -ForegroundColor Yellow
-    exit 1
+    if ($RunFromFile) { exit 1 }
 }
 finally {
     if ($TempBootstrap -and (Test-Path -LiteralPath $TempBootstrap)) {
         Remove-Item -LiteralPath $TempBootstrap -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $RunFromFile) {
+        # Leave the user's session as it was before "irm | iex".
+        Set-StrictMode -Off
+        $ErrorActionPreference = $CallerErrorActionPreference
     }
 }

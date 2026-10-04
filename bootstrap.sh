@@ -91,6 +91,30 @@ wait_for_cloud_init() {
   fi
 }
 
+# tigervncserver exits with code 1 when `hostname -f` fails. Some VPS images set
+# a hostname that neither /etc/hosts nor DNS knows; map it the Debian way.
+ensure_hostname_resolves() {
+  CURRENT_STEP="making the server hostname resolvable"
+  local name names
+  if hostname -f >/dev/null 2>&1; then
+    ok "Server hostname resolves: $(hostname -f)"
+    return 0
+  fi
+
+  name=$(hostname)
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "Server hostname '$name' is not a valid host name. Set a simple one, e.g. 'hostnamectl set-hostname vibecoder', and run the installer again."
+  names=$name
+  if [[ "$name" == *.* ]]; then
+    names="$name ${name%%.*}"
+  fi
+  if [[ -s /etc/hosts && -n "$(tail -c 1 /etc/hosts)" ]]; then
+    printf '\n' >> /etc/hosts
+  fi
+  printf '# Added by Vibecoder School installer: TigerVNC needs the hostname to resolve.\n127.0.1.1 %s\n' "$names" >> /etc/hosts
+  hostname -f >/dev/null 2>&1 || die "Server hostname '$name' still does not resolve after adding it to /etc/hosts. Check the 'hosts:' line in /etc/nsswitch.conf."
+  ok "Server hostname '$name' added to /etc/hosts"
+}
+
 # A background updater can take a lock after our preflight check. Retry only
 # actual lock contention, including apt-get update's separate lists lock.
 run_package_command() {
@@ -533,6 +557,7 @@ prepare() {
   load_os
   preflight_resources
   wait_for_cloud_init
+  ensure_hostname_resolves
   install_base_packages
   create_vibe_user
   install_firefox

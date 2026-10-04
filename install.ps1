@@ -42,7 +42,7 @@ function Stop-Install([string]$Message) {
 
 function Assert-LastExitCode([string]$Action) {
     if ($LASTEXITCODE -ne 0) {
-        Stop-Install "$Action завершилось с кодом $LASTEXITCODE."
+        Stop-Install "Шаг «$Action» завершился с кодом $LASTEXITCODE."
     }
 }
 
